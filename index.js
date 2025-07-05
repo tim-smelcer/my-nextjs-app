@@ -1,9 +1,6 @@
 import express from 'express';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import chromium from 'chrome-aws-lambda';
-
-puppeteer.use(StealthPlugin());
+import axios from 'axios';
+import { parse } from 'node-html-parser';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -12,47 +9,36 @@ app.get('/captions', async (req, res) => {
   const videoUrl = req.query.url;
   if (!videoUrl) return res.status(400).json({ error: 'Missing URL parameter' });
 
-  let browser;
+  const videoIdMatch = videoUrl.match(/v=([a-zA-Z0-9_-]+)/);
+  if (!videoIdMatch) return res.status(400).json({ error: 'Invalid YouTube URL' });
+
+  const videoId = videoIdMatch[1];
+
   try {
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath: await chromium.executablePath,
-      headless: chromium.headless,
-    });
+    const videoPage = await axios.get(`https://www.youtube.com/watch?v=${videoId}`);
+    const root = parse(videoPage.data);
+    const scriptTag = root.querySelectorAll('script').find(script => script.text.includes('captionTracks'));
 
-    const page = await browser.newPage();
-    await page.goto(videoUrl, { waitUntil: 'networkidle2' });
+    const captionTracksMatch = scriptTag.text.match(/"captionTracks":(\[.*?\])/);
+    if (!captionTracksMatch) return res.status(404).json({ error: 'No captions found for this video' });
 
-    // Click the "..." button under the video
-    await page.waitForSelector('button[aria-label="More actions"]', { timeout: 10000 });
-    await page.click('button[aria-label="More actions"]');
+    const captionTracks = JSON.parse(captionTracksMatch[1]);
+    const englishTrack = captionTracks.find(track => track.languageCode === 'en');
 
-    // Click "Show transcript"
-    await page.waitForTimeout(500);
-    await page.evaluate(() => {
-      const items = [...document.querySelectorAll('ytd-menu-service-item-renderer')];
-      const transcriptItem = items.find(el => el.textContent.toLowerCase().includes('transcript'));
-      if (transcriptItem) transcriptItem.click();
-    });
+    if (!englishTrack) return res.status(404).json({ error: 'English captions not available' });
 
-    // Wait for transcript panel
-    await page.waitForSelector('ytd-transcript-renderer', { timeout: 10000 });
+    const captionRes = await axios.get(englishTrack.baseUrl);
+    const captionRoot = parse(captionRes.data);
 
-    // Extract transcript
-    const transcript = await page.evaluate(() => {
-      const segments = document.querySelectorAll('ytd-transcript-segment-renderer');
-      return Array.from(segments).map(el => el.innerText).join('\n');
-    });
-
-    await browser.close();
+    const transcript = captionRoot.querySelectorAll('text').map(el => el.text).join('\n');
     return res.json({ transcript });
+
   } catch (err) {
-    if (browser) await browser.close();
-    console.error('Transcript error:', err);
+    console.error('Transcript fetch error:', err);
     return res.status(500).json({ error: 'Error fetching transcript' });
   }
 });
 
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`Server listening on port ${port}`);
 });
