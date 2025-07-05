@@ -1,47 +1,45 @@
 const express = require('express');
 const chromium = require('chrome-aws-lambda');
+const puppeteer = require('puppeteer-core');
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = process.env.PORT || 3000;
 
 app.get('/captions/:videoId', async (req, res) => {
   const { videoId } = req.params;
-  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+
+  let browser = null;
 
   try {
-    const browser = await chromium.puppeteer.launch({
+    browser = await puppeteer.launch({
       args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath,
-      headless: chromium.headless
+      headless: chromium.headless,
     });
 
     const page = await browser.newPage();
-    await page.goto(videoUrl, { waitUntil: 'networkidle2' });
+    await page.goto(url, { waitUntil: 'networkidle2' });
 
     const captions = await page.evaluate(() => {
-      const scripts = [...document.querySelectorAll('script')];
-      const playerScript = scripts.find(s => s.textContent.includes('captionTracks'));
-      if (!playerScript) return null;
-
-      const match = /"captionTracks":(\[.*?\])/.exec(playerScript.textContent);
-      if (!match || !match[1]) return null;
-
-      return JSON.parse(match[1]);
+      const captionTracks = window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (!captionTracks || captionTracks.length === 0) return 'No captions found';
+      return captionTracks.map(track => track.baseUrl);
     });
 
-    await browser.close();
-
-    if (!captions) {
-      return res.status(404).send('No captions found.');
-    }
-
-    res.json(captions);
+    res.json({ captions });
   } catch (error) {
     console.error('Error fetching transcript:', error);
     res.status(500).send(`Error fetching transcript: ${error.message}`);
+  } finally {
+    if (browser !== null) await browser.close();
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+app.get('/', (req, res) => {
+  res.send('API is running. Use /captions/:videoId');
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
