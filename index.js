@@ -1,55 +1,45 @@
-const express = require("express");
-const puppeteer = require("puppeteer-core");
-const chromium = require("@sparticuz/chromium");
-
+const express = require('express');
+const chromium = require('chrome-aws-lambda');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/captions/:videoId", async (req, res) => {
+app.get('/captions/:videoId', async (req, res) => {
   const { videoId } = req.params;
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   try {
-    const browser = await puppeteer.launch({
+    const browser = await chromium.puppeteer.launch({
       args: chromium.args,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath,
+      headless: chromium.headless
     });
 
     const page = await browser.newPage();
-    await page.goto(`https://www.youtube.com/watch?v=${videoId}`);
-
-    // Wait for transcript button (if available)
-    await page.waitForSelector("button[aria-label='More actions']", { timeout: 10000 });
-    await page.click("button[aria-label='More actions']");
-
-    await page.waitForSelector("ytd-menu-service-item-renderer");
-    const items = await page.$$("ytd-menu-service-item-renderer");
-    for (let item of items) {
-      const text = await item.evaluate(el => el.textContent);
-      if (text.toLowerCase().includes("show transcript")) {
-        await item.click();
-        break;
-      }
-    }
-
-    await page.waitForSelector("ytd-transcript-segment-renderer", { timeout: 10000 });
+    await page.goto(videoUrl, { waitUntil: 'networkidle2' });
 
     const captions = await page.evaluate(() => {
-      const segments = Array.from(document.querySelectorAll("ytd-transcript-segment-renderer"));
-      return segments.map(segment => segment.innerText.trim());
+      const scripts = [...document.querySelectorAll('script')];
+      const playerScript = scripts.find(s => s.textContent.includes('captionTracks'));
+      if (!playerScript) return null;
+
+      const match = /"captionTracks":(\[.*?\])/.exec(playerScript.textContent);
+      if (!match || !match[1]) return null;
+
+      return JSON.parse(match[1]);
     });
 
     await browser.close();
-    res.json({ videoId, captions });
 
+    if (!captions) {
+      return res.status(404).send('No captions found.');
+    }
+
+    res.json(captions);
   } catch (error) {
-    console.error("Error fetching transcript:", error);
+    console.error('Error fetching transcript:', error);
     res.status(500).send(`Error fetching transcript: ${error.message}`);
   }
-});
-
-app.get("/", (req, res) => {
-  res.send("Puppeteer Caption API is running.");
 });
 
 app.listen(PORT, () => {
